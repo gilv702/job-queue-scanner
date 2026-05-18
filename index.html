@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Scan QR Code — Golden MFG</title>
+<style>
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; user-select: none; }
+  html, body { height: 100%; margin: 0; padding: 0; }
+  body {
+    background: #1a1a1a;
+    color: #fff;
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    touch-action: manipulation;
+  }
+  .header {
+    padding: 16px;
+    text-align: center;
+    background: #2a6a9a;
+    font-weight: 800;
+    font-size: 18px;
+    letter-spacing: 0.5px;
+  }
+  .scanner-wrap {
+    flex: 1;
+    position: relative;
+    background: #000;
+    overflow: hidden;
+  }
+  #qr-reader {
+    width: 100%;
+    height: 100%;
+  }
+  #qr-reader video {
+    width: 100% !important;
+    height: 100% !important;
+    object-fit: cover;
+  }
+  .error {
+    color: #ff8a8a;
+    text-align: center;
+    padding: 20px;
+    font-size: 14px;
+    font-weight: 700;
+    line-height: 1.4;
+  }
+  .footer {
+    padding: 14px;
+    display: flex;
+    gap: 10px;
+  }
+  .btn {
+    flex: 1;
+    border: none;
+    border-radius: 10px;
+    padding: 16px;
+    font-size: 16px;
+    font-weight: 800;
+    cursor: pointer;
+    letter-spacing: 0.5px;
+  }
+  .btn-cancel { background: #333; color: #fff; border: 1px solid #555; }
+  .btn-manual { background: #d4a017; color: #1a1a1a; }
+  .success-flash {
+    position: absolute;
+    inset: 0;
+    background: rgba(42, 122, 58, 0.7);
+    display: none;
+    align-items: center;
+    justify-content: center;
+    font-size: 80px;
+    z-index: 100;
+  }
+  .success-flash.show { display: flex; }
+  .status {
+    text-align: center;
+    padding: 8px;
+    color: #aaa;
+    font-size: 12px;
+  }
+</style>
+</head>
+<body>
+
+<div class="header">Point camera at QR code</div>
+
+<div class="scanner-wrap">
+  <div id="qr-reader"></div>
+  <div id="success-flash" class="success-flash">✓</div>
+</div>
+
+<div id="error-area" class="error" style="display:none;"></div>
+<div id="status-area" class="status">Loading camera…</div>
+
+<div class="footer">
+  <button class="btn btn-manual" onclick="manualEntry()">⌨️ Type # Instead</button>
+  <button class="btn btn-cancel" onclick="cancelScan()">Cancel</button>
+</div>
+
+<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
+<script>
+  // =====================================================================
+  // CONFIG — set the return URL to your Apps Script deployment.
+  // The camera page redirects back here after scanning, with the result
+  // encoded in URL params that Scanner.html knows how to read.
+  // =====================================================================
+  var RETURN_BASE_URL = 'https://script.google.com/a/macros/goldenmfg.com/s/AKfycbwWgZfPUBqoyQsObIFTyDEwee-A66oKYTHhvv8XtgIsjje0CsWjJuYZTp7ubP4a7ttOpw/exec';
+
+  var qrScanner = null;
+  var sent = false;
+
+  function getQueryParam(name) {
+    var m = window.location.search.match(new RegExp('[?&]' + name + '=([^&]+)'));
+    return m ? decodeURIComponent(m[1]) : '';
+  }
+
+  function buildReturnUrl(payload) {
+    var stationParam = getQueryParam('from') || 'marking';
+    var url = RETURN_BASE_URL +
+      '?page=scan&station=' + encodeURIComponent(stationParam);
+    if (payload.type === 'scanResult' && payload.code) {
+      url += '&scanned=' + encodeURIComponent(payload.code);
+    } else if (payload.type === 'manualRequest') {
+      url += '&manual=1';
+    }
+    return url;
+  }
+
+  function postResult(payload) {
+    if (sent) return;
+    sent = true;
+
+    if (payload.type === 'cancel') {
+      // Just go back to the scan page without any params
+      var stationParam = getQueryParam('from') || 'marking';
+      window.location.replace(
+        RETURN_BASE_URL + '?page=scan&station=' + encodeURIComponent(stationParam)
+      );
+      return;
+    }
+
+    // Redirect this tab back to Apps Script with the result in URL params
+    window.location.replace(buildReturnUrl(payload));
+  }
+
+  function onScanSuccess(decodedText) {
+    if (sent) return;
+    if (qrScanner) {
+      try { qrScanner.stop(); } catch (e) {}
+    }
+    document.getElementById('success-flash').classList.add('show');
+    document.getElementById('status-area').textContent = 'Got it — opening confirm…';
+    setTimeout(function() {
+      postResult({ type: 'scanResult', code: decodedText });
+    }, 400);  // brief flash so worker sees the success
+  }
+
+  function manualEntry() {
+    postResult({ type: 'manualRequest' });
+  }
+
+  function cancelScan() {
+    postResult({ type: 'cancel' });
+  }
+
+  function showError(msg) {
+    document.getElementById('error-area').style.display = 'block';
+    document.getElementById('error-area').textContent = msg;
+    document.getElementById('status-area').textContent = '';
+  }
+
+  function clearStatus() {
+    document.getElementById('status-area').textContent = '';
+  }
+
+  function startScanner() {
+    try {
+      qrScanner = new Html5Qrcode('qr-reader');
+    } catch (e) {
+      showError('Scanner failed to load: ' + (e.message || e));
+      return;
+    }
+    var config = { fps: 10, qrbox: { width: 250, height: 250 } };
+    qrScanner.start(
+      { facingMode: 'environment' },
+      config,
+      onScanSuccess,
+      function() {}
+    ).then(function() {
+      clearStatus();
+    }).catch(function(err) {
+      var msg = (err && err.message) ? err.message : String(err);
+      if (/NotAllowed|Permission/i.test(msg)) {
+        showError('Camera permission denied. Tap "Type # Instead" to continue.');
+      } else if (/NotFound|NotReadable/i.test(msg)) {
+        showError('No camera available. Tap "Type # Instead".');
+      } else {
+        showError('Camera error: ' + msg + ' — tap "Type # Instead".');
+      }
+    });
+  }
+
+  window.addEventListener('load', startScanner);
+</script>
+
+</body>
+</html>
