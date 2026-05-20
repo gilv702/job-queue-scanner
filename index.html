@@ -47,6 +47,104 @@
     font-weight: 700;
     line-height: 1.4;
   }
+
+  /* Big "TAP TO SCAN" button overlay */
+  .tap-overlay {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-end;
+    pointer-events: none;
+    z-index: 30;
+  }
+  .tap-overlay.hidden { display: none; }
+  .tap-btn {
+    pointer-events: auto;
+    background: #2a7a3a;
+    color: #fff;
+    border: none;
+    border-radius: 14px;
+    padding: 22px 40px;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: 1.5px;
+    box-shadow: 0 8px 22px rgba(0,0,0,0.6);
+    margin-bottom: 30px;
+    cursor: pointer;
+    animation: tap-pulse 2s ease-in-out infinite;
+  }
+  @keyframes tap-pulse {
+    0%, 100% { transform: scale(1); }
+    50% { transform: scale(1.04); }
+  }
+
+  /* SCANNING overlay (after worker taps TAP TO SCAN) */
+  .scanning-overlay {
+    position: absolute;
+    inset: 0;
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.35);
+    z-index: 40;
+    pointer-events: none;
+  }
+  .scanning-overlay.show { display: flex; }
+  .scan-icon-wrap {
+    width: 220px;
+    height: 220px;
+    position: relative;
+    border: 4px solid #6a9aff;
+    border-radius: 16px;
+    box-shadow: 0 0 0 999px rgba(0, 0, 0, 0.35);
+    animation: scan-frame-pulse 1.5s ease-in-out infinite;
+  }
+  @keyframes scan-frame-pulse {
+    0%, 100% { box-shadow: 0 0 0 999px rgba(0,0,0,0.35), 0 0 20px rgba(106,154,255,0.6); }
+    50%      { box-shadow: 0 0 0 999px rgba(0,0,0,0.35), 0 0 35px rgba(106,154,255,1); }
+  }
+  .scan-line {
+    position: absolute;
+    left: 0;
+    right: 0;
+    height: 3px;
+    background: linear-gradient(90deg, transparent, #6a9aff 30%, #6a9aff 70%, transparent);
+    box-shadow: 0 0 12px #6a9aff;
+    animation: scan-sweep 1.8s ease-in-out infinite;
+    top: 0;
+  }
+  @keyframes scan-sweep {
+    0%, 100% { top: 0%; }
+    50%      { top: calc(100% - 3px); }
+  }
+  .scanning-label {
+    margin-top: 30px;
+    font-size: 24px;
+    font-weight: 800;
+    letter-spacing: 2px;
+    color: #fff;
+    background: rgba(0, 0, 0, 0.75);
+    padding: 10px 22px;
+    border-radius: 8px;
+    animation: scan-label-blink 1.4s ease-in-out infinite;
+  }
+  @keyframes scan-label-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.45; }
+  }
+  .scanning-tip {
+    margin-top: 14px;
+    font-size: 14px;
+    font-weight: 700;
+    color: #ddd;
+    background: rgba(0, 0, 0, 0.6);
+    padding: 6px 14px;
+    border-radius: 6px;
+  }
+
   .footer {
     padding: 14px;
     display: flex;
@@ -89,6 +187,21 @@
 
 <div class="scanner-wrap">
   <div id="qr-reader"></div>
+
+  <!-- Big TAP TO SCAN button shown when camera is ready -->
+  <div class="tap-overlay" id="tap-overlay">
+    <button class="tap-btn" onclick="armScanner()">📷 TAP TO SCAN</button>
+  </div>
+
+  <!-- SCANNING overlay (shown after worker taps; live decode in progress) -->
+  <div class="scanning-overlay" id="scanning-overlay">
+    <div class="scan-icon-wrap">
+      <div class="scan-line"></div>
+    </div>
+    <div class="scanning-label">🔍 SCANNING...</div>
+    <div class="scanning-tip">Hold steady on the QR code</div>
+  </div>
+
   <div id="success-flash" class="success-flash">✓</div>
 </div>
 
@@ -111,6 +224,11 @@
 
   var qrScanner = null;
   var sent = false;
+  // Camera state:
+  //   'idle'  — camera streaming for preview but NOT acting on decoded values
+  //   'armed' — TAP TO SCAN was pressed; SCANNING overlay shown; next decode wins
+  //   'done'  — got a hit; about to redirect
+  var camState = 'idle';
 
   function getQueryParam(name) {
     var m = window.location.search.match(new RegExp('[?&]' + name + '=([^&]+)'));
@@ -134,28 +252,28 @@
     sent = true;
 
     if (payload.type === 'cancel') {
-      // Just go back to the scan page without any params
       var stationParam = getQueryParam('from') || 'marking';
       window.location.replace(
         RETURN_BASE_URL + '?page=scan&station=' + encodeURIComponent(stationParam)
       );
       return;
     }
-
-    // Redirect this tab back to Apps Script with the result in URL params
     window.location.replace(buildReturnUrl(payload));
   }
 
   function onScanSuccess(decodedText) {
     if (sent) return;
+    if (camState !== 'armed') return;  // ignore decodes until worker taps TAP TO SCAN
+    camState = 'done';
     if (qrScanner) {
       try { qrScanner.stop(); } catch (e) {}
     }
+    document.getElementById('scanning-overlay').classList.remove('show');
     document.getElementById('success-flash').classList.add('show');
     document.getElementById('status-area').textContent = 'Got it — opening confirm…';
     setTimeout(function() {
       postResult({ type: 'scanResult', code: decodedText });
-    }, 400);  // brief flash so worker sees the success
+    }, 400);
   }
 
   function manualEntry() {
@@ -176,6 +294,14 @@
     document.getElementById('status-area').textContent = '';
   }
 
+  // Called when worker taps the big TAP TO SCAN button
+  function armScanner() {
+    if (camState !== 'idle') return;
+    camState = 'armed';
+    document.getElementById('tap-overlay').classList.add('hidden');
+    document.getElementById('scanning-overlay').classList.add('show');
+  }
+
   function startScanner() {
     try {
       qrScanner = new Html5Qrcode('qr-reader');
@@ -184,6 +310,8 @@
       return;
     }
     var config = { fps: 10, qrbox: { width: 250, height: 250 } };
+    // Start camera immediately so worker sees the live preview;
+    // onScanSuccess will gate on camState === 'armed' before acting.
     qrScanner.start(
       { facingMode: 'environment' },
       config,
